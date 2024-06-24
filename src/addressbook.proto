@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package tutorial;
+
+message Attributes {
+  optional string name = 1;
+  optional int64 id = 2;
+  optional string email = 3;
+}
+
+message Message {
+  Attributes attributes = 1;
+  bytes payload = 2;
+}
+
