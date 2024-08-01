@@ -5,10 +5,11 @@
 
 class Filer {
 public:
-    Filer(const std::string& path);
+    Filer();
 
-    void send(const std::string& name, const std::string& attributes, const std::string& payload);
-    bool read(const std::string& name, std::string& attributes, std::string& payload);
+    void send(const std::string& name, const std::string& attributes, const std::string& payload, const size_t& fmt);
+    bool read(const std::string& name, std::string& attributes, std::string& payload, size_t& fmt);
+    bool remove(const std::string& name);
     
 private:
     struct Impl;
