@@ -11,7 +11,7 @@ int main(int argc, char *argv[])
 
     string first, second;
     size_t fmt;
-    f.read("x", first, second, fmt);
-    cout << "first=" << first << " second=" << second << " fmt=" << fmt << endl;
+    auto v = f.read("x", first, second, fmt);
+    cout << "v=" << v << " first=" << first << " second=" << second << " fmt=" << fmt << endl;
     f.remove("x");
 }

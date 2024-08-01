@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/mman.h>
+#include <sys/inotify.h>
 #include <cstring>
 #include <filesystem>
 #include <sstream>
@@ -28,7 +29,7 @@ struct MyExcept : public std::system_error {
 struct Filer::Impl {
     filesystem::path root_dir;
     filesystem::path data_dir;
-    int tempfd, datafd;
+    int temp_fd_, data_fd_, note_fd_;
 
     Impl()
     {
@@ -43,16 +44,17 @@ struct Filer::Impl {
         if (!filesystem::exists(data_dir)) {
             filesystem::create_directory(data_dir);
         }
-        if ((tempfd = open(root_dir.c_str(), O_DIRECTORY|O_RDONLY)) < 0)
+        if ((temp_fd_ = open(root_dir.c_str(), O_DIRECTORY|O_RDONLY)) < 0)
             throw MyExcept("open");
-        if ((datafd = open(data_dir.c_str(), O_DIRECTORY|O_RDONLY)) < 0)
+        if ((data_fd_ = open(data_dir.c_str(), O_DIRECTORY|O_RDONLY)) < 0)
             throw MyExcept("open");
+        note_fd_ = inotify_init();
     }
 
     ~Impl()
     {
-        close(tempfd);
-        close(datafd);
+        close(temp_fd_);
+        close(data_fd_);
     }
 
     void send(const string& name, const string& attributes, const string& payload, const size_t& fmt)
@@ -60,7 +62,7 @@ struct Filer::Impl {
         auto t = chrono::duration_cast<chrono::nanoseconds>(chrono::steady_clock::now().time_since_epoch()).count();
         char file_name[64];
         snprintf(file_name, sizeof(file_name), "%0lx", t);
-        int fd = openat(tempfd, file_name, O_CREAT|O_RDWR, 0644);
+        int fd = openat(temp_fd_, file_name, O_CREAT|O_RDWR, 0644);
         if (fd < 0) {
             throw MyExcept("openat");
         }
@@ -78,10 +80,10 @@ struct Filer::Impl {
         if (munmap(ptr, sizeof(Msg)) < 0) {
             throw MyExcept("mumap");
         }
-        if (linkat(tempfd, file_name, datafd, name.c_str(), 0) < 0) {
+        if (linkat(temp_fd_, file_name, data_fd_, name.c_str(), 0) < 0) {
             throw MyExcept("linkat");
         }
-        if (unlinkat(tempfd, file_name, 0) < 0) {
+        if (unlinkat(temp_fd_, file_name, 0) < 0) {
             throw MyExcept("unlinkat");
         }
         close(fd);
@@ -89,21 +91,19 @@ struct Filer::Impl {
 
     bool read(const string& name, string& attributes, string& payload, size_t& fmt)
     {
-        int fd = openat(datafd, name.c_str(), O_RDONLY);
+        int fd = openat(data_fd_, name.c_str(), O_RDONLY);
         if (fd < 0) {
             return false;
         }
-        void *ptr = mmap(0, sizeof(Msg), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+        void *ptr = mmap(0, sizeof(Msg), PROT_READ, MAP_SHARED, fd, 0);
         if (ptr == MAP_FAILED) {
             close(fd);
             return false;
         }
         close(fd);
         auto msg = reinterpret_cast<Msg*>(ptr);
-        attributes.resize(msg->attr_size);
-        memcpy(attributes.c_str(), msg->attr, msg->attr_size);
-        payload.resize(msg->payload_size);
-        memcpy(payload.c_str(), msg->payload, msg->payload_size);
+        attributes = string(msg->attr, msg->attr_size);
+        payload = string(msg->payload, msg->payload_size);
         fmt = msg->payload_fmt;
         if (munmap(ptr, sizeof(Msg)) < 0) {
             throw MyExcept("mumap");
@@ -113,7 +113,7 @@ struct Filer::Impl {
 
     bool remove(const string& name)
     {
-        return unlinkat(datafd, name.c_str(), 0) >= 0;
+        return unlinkat(data_fd_, name.c_str(), 0) >= 0;
     }
 };
 
