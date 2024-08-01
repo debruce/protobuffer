@@ -2,13 +2,16 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 class Filer {
 public:
+    using DataVector = std::vector<std::string>;
+
     Filer();
 
-    void send(const std::string& name, const std::string& attributes, const std::string& payload, const size_t& fmt);
-    bool read(const std::string& name, std::string& attributes, std::string& payload, size_t& fmt);
+    void send(const std::string& name, const DataVector& data);
+    bool read(const std::string& name, DataVector& data);
     bool remove(const std::string& name);
     
 private:

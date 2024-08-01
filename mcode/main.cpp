@@ -7,11 +7,10 @@ int main(int argc, char *argv[])
 {
     Filer f;
 
-    f.send("x", "y", "z", 5);
+    f.send("x", vector<string>{"x", "y"});
 
-    string first, second;
-    size_t fmt;
-    auto v = f.read("x", first, second, fmt);
-    cout << "v=" << v << " first=" << first << " second=" << second << " fmt=" << fmt << endl;
+    vector<string> data;
+    auto v = f.read("x", data);
+    cout << "v=" << v << " first=" << data[0] << " second=" << data[1] << endl;
     f.remove("x");
 }

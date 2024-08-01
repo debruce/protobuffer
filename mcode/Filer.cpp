@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/inotify.h>
 #include <cstring>
@@ -13,18 +14,27 @@
 
 using namespace std;
 
-struct Msg {
-    size_t attr_size;
-    size_t payload_size;
-    size_t payload_fmt;
-    char attr[512];
-    char payload[4096 - 512 - 3 * sizeof(size_t)];
-};
-
 struct MyExcept : public std::system_error {
     MyExcept(const string& scall_name)
         : system_error(error_code(errno, generic_category()), scall_name) {}
 };
+
+using DataVector = Filer::DataVector;
+
+size_t chunk_size(size_t bytes, size_t alignment)
+{
+    return ((bytes + alignment - 1) / alignment) * alignment;
+}
+
+inline void* advance(void* ptr, size_t bytes)
+{
+    return static_cast<char*>(ptr) + bytes;
+}
+
+inline size_t& as_size_t(void* ptr)
+{
+    return *static_cast<size_t*>(ptr);
+}
 
 struct Filer::Impl {
     filesystem::path root_dir;
@@ -57,8 +67,13 @@ struct Filer::Impl {
         close(data_fd_);
     }
 
-    void send(const string& name, const string& attributes, const string& payload, const size_t& fmt)
+    void send(const string& name, const DataVector& data)
     {
+        size_t byte_count = sizeof(size_t); // the number of vectors
+        for (const auto& v : data) {
+            byte_count += sizeof(size_t); // the length of the next vector
+            byte_count += chunk_size(v.size(), sizeof(size_t));
+        }
         auto t = chrono::duration_cast<chrono::nanoseconds>(chrono::steady_clock::now().time_since_epoch()).count();
         char file_name[64];
         snprintf(file_name, sizeof(file_name), "%0lx", t);
@@ -66,18 +81,23 @@ struct Filer::Impl {
         if (fd < 0) {
             throw MyExcept("openat");
         }
-        ftruncate(fd, sizeof(Msg));
-        void *ptr = mmap(0, sizeof(Msg), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
-        if (ptr == MAP_FAILED) {
+        ftruncate(fd, byte_count);
+        auto orig_ptr = mmap(0, byte_count, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+        if (orig_ptr == MAP_FAILED) {
             throw MyExcept("mmap");
         }
-        auto msg = reinterpret_cast<Msg*>(ptr);
-        memcpy(msg->attr, attributes.c_str(), attributes.size());
-        msg->attr_size = attributes.size();
-        memcpy(msg->payload, payload.c_str(), payload.size());
-        msg->payload_size = payload.size();
-        msg->payload_fmt = fmt;
-        if (munmap(ptr, sizeof(Msg)) < 0) {
+        auto ptr = orig_ptr;
+        as_size_t(ptr) = data.size();
+        ptr = advance(ptr, sizeof(size_t));
+        for (const auto& v : data) {
+            as_size_t(ptr) = v.size();
+            ptr = advance(ptr, sizeof(size_t));
+            memcpy(ptr, v.data(), v.size());
+            size_t space = 0x10000000;
+            ptr = align(sizeof(size_t), v.size(), ptr, space);
+        }
+
+        if (munmap(orig_ptr, byte_count) < 0) {
             throw MyExcept("mumap");
         }
         if (linkat(temp_fd_, file_name, data_fd_, name.c_str(), 0) < 0) {
@@ -89,23 +109,31 @@ struct Filer::Impl {
         close(fd);
     }
 
-    bool read(const string& name, string& attributes, string& payload, size_t& fmt)
+    bool read(const string& name, DataVector& data)
     {
         int fd = openat(data_fd_, name.c_str(), O_RDONLY);
         if (fd < 0) {
             return false;
         }
-        void *ptr = mmap(0, sizeof(Msg), PROT_READ, MAP_SHARED, fd, 0);
-        if (ptr == MAP_FAILED) {
+        struct stat ss;
+        fstat(fd, &ss);
+        auto orig_ptr = mmap(0, ss.st_size, PROT_READ, MAP_SHARED, fd, 0);
+        if (orig_ptr == MAP_FAILED) {
             close(fd);
             return false;
         }
         close(fd);
-        auto msg = reinterpret_cast<Msg*>(ptr);
-        attributes = string(msg->attr, msg->attr_size);
-        payload = string(msg->payload, msg->payload_size);
-        fmt = msg->payload_fmt;
-        if (munmap(ptr, sizeof(Msg)) < 0) {
+        auto ptr = orig_ptr;
+        size_t vcount = as_size_t(ptr);
+        ptr = advance(ptr, sizeof(size_t));
+        data.resize(vcount);
+        for (auto i = 0; i < vcount; i++) {
+            size_t bcount = as_size_t(ptr);
+            ptr = advance(ptr, sizeof(size_t));
+            auto p = static_cast<char*>(ptr);
+            data[i] = string(p, bcount);
+        }
+        if (munmap(orig_ptr, ss.st_size) < 0) {
             throw MyExcept("mumap");
         }
         return true;
@@ -122,14 +150,14 @@ Filer::Filer() : pImpl(new Impl())
 
 }
 
-void Filer::send(const string& name, const string& attributes, const string& payload, const size_t& fmt)
+void Filer::send(const string& name, const DataVector& data)
 {
-    pImpl->send(name, attributes, payload, fmt);
+    pImpl->send(name, data);
 }
 
-bool Filer::read(const string& name, string& attributes, string& payload, size_t& fmt)
+bool Filer::read(const string& name, DataVector& data)
 {
-    return pImpl->read(name, attributes, payload, fmt);
+    return pImpl->read(name, data);
 }
 
 bool Filer::remove(const string& name)
