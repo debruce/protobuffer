@@ -14,6 +14,7 @@
 #include <system_error>
 #include <chrono>
 #include <thread>
+#include <string_view>
 #include <iostream>
 
 using namespace std;
@@ -43,7 +44,7 @@ inline size_t& as_size_t(void* ptr)
 struct Filer::Impl {
     filesystem::path root_dir_, data_dir_;
     int temp_fd_, data_fd_, note_fd_;
-    int watch_fd;
+    int watch_fd_data_, watch_fd_root_;
     thread* tid;
 
     Impl()
@@ -157,30 +158,32 @@ struct Filer::Impl {
     void watch(bool state)
     {
         if (state) {
-            if ((watch_fd = inotify_add_watch(note_fd_, data_dir_.c_str(), IN_CREATE)) < 0) {
+            if ((watch_fd_data_ = inotify_add_watch(note_fd_, data_dir_.c_str(), IN_OPEN|IN_CREATE)) < 0) {
                 throw MyExcept("inotify_add_watch");
             }
             tid = new thread([&]() { this->wait(); });
         }
         else {
-            if (inotify_rm_watch(note_fd_, watch_fd) < 0) {
+            if (inotify_rm_watch(note_fd_, watch_fd_data_) < 0) {
                 throw MyExcept("inotify_rm_watch");
-            }   
+            }
         }
     }
 
     void wait()
     {
-        cout << "in wait" << endl;
         while (true) {
-            struct inotify_event ie;
-            int ret = ::read(note_fd_, &ie, sizeof(ie));
+            char buf[4096];
+            int ret = ::read(note_fd_, buf, sizeof(buf));
             if (ret >=  0) {
-                cout << "wd=" << ie.wd
-                    << " mask=" << ie.mask
-                    << " cookie=" << ie.cookie
-                    << " len=" << ie.len
+                auto ie = (struct inotify_event *)buf;
+                cout << "wd=" << ie->wd
+                    << " mask=" << hex << ie->mask << dec
+                    << " name=" << string_view(ie->name, ie->len)
                     << endl;
+            }
+            else {
+                cout << "read returned ret=" << ret << " errno=" << errno << endl;
             }
         }
     }
