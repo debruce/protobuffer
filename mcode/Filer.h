@@ -13,6 +13,8 @@ public:
     void send(const std::string& name, const DataVector& data);
     bool read(const std::string& name, DataVector& data);
     bool remove(const std::string& name);
+    void watch(bool state = true);
+    void wait();
     
 private:
     struct Impl;

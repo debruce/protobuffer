@@ -1,4 +1,5 @@
 #include "Filer.h"
+#include <unistd.h>
 #include <iostream>
 
 using namespace std;
@@ -7,7 +8,10 @@ int main(int argc, char *argv[])
 {
     Filer f;
 
+    f.watch(true);
+    sleep(1);
     f.send("x", vector<string>{"x", "y"});
+    sleep(1);
 
     vector<string> data;
     auto v = f.read("x", data);

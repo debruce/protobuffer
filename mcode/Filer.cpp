@@ -1,6 +1,9 @@
 #include "Filer.h"
+
 #include <fcntl.h>
 #include <unistd.h>
+#include <signal.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -10,6 +13,7 @@
 #include <sstream>
 #include <system_error>
 #include <chrono>
+#include <thread>
 #include <iostream>
 
 using namespace std;
@@ -37,34 +41,40 @@ inline size_t& as_size_t(void* ptr)
 }
 
 struct Filer::Impl {
-    filesystem::path root_dir;
-    filesystem::path data_dir;
+    filesystem::path root_dir_, data_dir_;
     int temp_fd_, data_fd_, note_fd_;
+    int watch_fd;
+    thread* tid;
 
     Impl()
     {
-        root_dir = "/run/user/";
-        root_dir /= to_string(getuid());
-        data_dir = root_dir / "filer";
-        if (filesystem::exists(data_dir) && !filesystem::is_directory(data_dir)) {
+        root_dir_ = "/run/user/";
+        root_dir_ /= to_string(getuid());
+        data_dir_ = root_dir_ / "filer";
+        if (filesystem::exists(data_dir_) && !filesystem::is_directory(data_dir_)) {
             stringstream ss;
-            ss << '"' << data_dir << "\" exists and is not a directory.";
+            ss << '"' << data_dir_ << "\" exists and is not a directory.";
             throw runtime_error(ss.str());
         }
-        if (!filesystem::exists(data_dir)) {
-            filesystem::create_directory(data_dir);
+        if (!filesystem::exists(data_dir_)) {
+            filesystem::create_directory(data_dir_);
         }
-        if ((temp_fd_ = open(root_dir.c_str(), O_DIRECTORY|O_RDONLY)) < 0)
+        if ((temp_fd_ = open(root_dir_.c_str(), O_DIRECTORY|O_RDONLY)) < 0)
             throw MyExcept("open");
-        if ((data_fd_ = open(data_dir.c_str(), O_DIRECTORY|O_RDONLY)) < 0)
+        if ((data_fd_ = open(data_dir_.c_str(), O_DIRECTORY|O_RDONLY)) < 0)
             throw MyExcept("open");
         note_fd_ = inotify_init();
     }
 
     ~Impl()
     {
+        if (tid) {
+            tid->join();
+            delete tid;
+        }
         close(temp_fd_);
         close(data_fd_);
+        close(note_fd_);
     }
 
     void send(const string& name, const DataVector& data)
@@ -143,6 +153,37 @@ struct Filer::Impl {
     {
         return unlinkat(data_fd_, name.c_str(), 0) >= 0;
     }
+
+    void watch(bool state)
+    {
+        if (state) {
+            if ((watch_fd = inotify_add_watch(note_fd_, data_dir_.c_str(), IN_CREATE)) < 0) {
+                throw MyExcept("inotify_add_watch");
+            }
+            tid = new thread([&]() { this->wait(); });
+        }
+        else {
+            if (inotify_rm_watch(note_fd_, watch_fd) < 0) {
+                throw MyExcept("inotify_rm_watch");
+            }   
+        }
+    }
+
+    void wait()
+    {
+        cout << "in wait" << endl;
+        while (true) {
+            struct inotify_event ie;
+            int ret = ::read(note_fd_, &ie, sizeof(ie));
+            if (ret >=  0) {
+                cout << "wd=" << ie.wd
+                    << " mask=" << ie.mask
+                    << " cookie=" << ie.cookie
+                    << " len=" << ie.len
+                    << endl;
+            }
+        }
+    }
 };
 
 Filer::Filer() : pImpl(new Impl())
@@ -163,4 +204,14 @@ bool Filer::read(const string& name, DataVector& data)
 bool Filer::remove(const string& name)
 {
     return pImpl->remove(name);
+}
+
+void Filer::watch(bool state)
+{
+    pImpl->watch(state);
+}
+
+void Filer::wait()
+{
+    pImpl->wait();
 }
