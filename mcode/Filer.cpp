@@ -9,7 +9,6 @@
 #include <sys/mman.h>
 #include <sys/inotify.h>
 #include <cstring>
-#include <filesystem>
 #include <sstream>
 #include <system_error>
 #include <chrono>
@@ -42,25 +41,20 @@ inline size_t& as_size_t(void* ptr)
 }
 
 struct Filer::Impl {
-    filesystem::path root_dir_, data_dir_;
-    int temp_fd_, data_fd_, note_fd_;
-    int watch_fd_data_, watch_fd_root_;
+    filesystem::path temp_dir_;
+    filesystem::path data_dir_;
+    int temp_fd_;
+    int data_fd_;
+    int note_fd_;
+    int watch_token_;
     thread* tid;
 
-    Impl()
+    Impl(const filesystem::path& root_dir)
     {
-        root_dir_ = "/run/user/";
-        root_dir_ /= to_string(getuid());
-        data_dir_ = root_dir_ / "filer";
-        if (filesystem::exists(data_dir_) && !filesystem::is_directory(data_dir_)) {
-            stringstream ss;
-            ss << '"' << data_dir_ << "\" exists and is not a directory.";
-            throw runtime_error(ss.str());
-        }
-        if (!filesystem::exists(data_dir_)) {
-            filesystem::create_directory(data_dir_);
-        }
-        if ((temp_fd_ = open(root_dir_.c_str(), O_DIRECTORY|O_RDONLY)) < 0)
+        data_dir_ = root_dir;
+        temp_dir_ = root_dir / "temp";
+        filesystem::create_directories(temp_dir_);
+        if ((temp_fd_ = open(temp_dir_.c_str(), O_DIRECTORY|O_RDONLY)) < 0)
             throw MyExcept("open");
         if ((data_fd_ = open(data_dir_.c_str(), O_DIRECTORY|O_RDONLY)) < 0)
             throw MyExcept("open");
@@ -158,13 +152,13 @@ struct Filer::Impl {
     void watch(bool state)
     {
         if (state) {
-            if ((watch_fd_data_ = inotify_add_watch(note_fd_, data_dir_.c_str(), IN_OPEN|IN_CREATE)) < 0) {
+            if ((watch_token_ = inotify_add_watch(note_fd_, data_dir_.c_str(), IN_OPEN|IN_CREATE)) < 0) {
                 throw MyExcept("inotify_add_watch");
             }
             tid = new thread([&]() { this->wait(); });
         }
         else {
-            if (inotify_rm_watch(note_fd_, watch_fd_data_) < 0) {
+            if (inotify_rm_watch(note_fd_, watch_token_) < 0) {
                 throw MyExcept("inotify_rm_watch");
             }
         }
@@ -189,9 +183,8 @@ struct Filer::Impl {
     }
 };
 
-Filer::Filer() : pImpl(new Impl())
+Filer::Filer(const filesystem::path& root_dir) : pImpl(new Impl(root_dir))
 {
-
 }
 
 void Filer::send(const string& name, const DataVector& data)

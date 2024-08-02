@@ -1,12 +1,15 @@
 #include "Filer.h"
 #include <unistd.h>
+#include <filesystem>
 #include <iostream>
 
 using namespace std;
 
 int main(int argc, char *argv[])
 {
-    Filer f;
+    auto files = filesystem::path{"/run/user/1000"} / "filer";
+    cout << "temp = " << files << endl;
+    Filer f(files);
 
     f.watch();
 
