@@ -36,6 +36,19 @@ inline void* advance(void* ptr, size_t bytes)
     return static_cast<char*>(ptr) + bytes;
 }
 
+inline void* my_align(void* ptr, size_t bytes)
+{
+    auto nptr = static_cast<char*>(ptr) + (bytes + sizeof(size_t) - 1);
+    auto w = reinterpret_cast<uint64_t>(nptr);
+    w = (w / sizeof(size_t)) * sizeof(size_t);
+    return reinterpret_cast<void*>(w);
+}
+
+inline size_t dist(void* ptr, void* org)
+{
+    return static_cast<char*>(ptr) - static_cast<char*>(org);
+}
+
 inline size_t& as_size_t(void* ptr)
 {
     return *static_cast<size_t*>(ptr);
@@ -46,9 +59,6 @@ struct Filer::Impl {
     path data_dir_;
     int temp_fd_;
     int data_fd_;
-    int note_fd_;
-    int watch_token_;
-    thread* tid;
 
     Impl(const path& root_dir)
     {
@@ -59,18 +69,12 @@ struct Filer::Impl {
             throw MyExcept("open", temp_dir_);
         if ((data_fd_ = open(data_dir_.c_str(), O_DIRECTORY|O_RDONLY)) < 0)
             throw MyExcept("open", data_dir_);
-        note_fd_ = inotify_init();
     }
 
     ~Impl()
     {
-        if (tid) {
-            tid->join();
-            delete tid;
-        }
         close(temp_fd_);
         close(data_fd_);
-        close(note_fd_);
     }
 
     void send(const string& name, const DataVector& data)
@@ -99,8 +103,7 @@ struct Filer::Impl {
             as_size_t(ptr) = v.size();
             ptr = advance(ptr, sizeof(size_t));
             memcpy(ptr, v.data(), v.size());
-            size_t space = 0x10000000;
-            ptr = align(sizeof(size_t), v.size(), ptr, space);
+            ptr = my_align(ptr, v.size());
         }
 
         if (munmap(orig_ptr, byte_count) < 0) {
@@ -124,43 +127,11 @@ struct Filer::Impl {
     {
         return unlinkat(data_fd_, name.c_str(), 0) >= 0;
     }
-
-    void watch(bool state)
-    {
-        if (state) {
-            if ((watch_token_ = inotify_add_watch(note_fd_, data_dir_.c_str(), IN_OPEN|IN_CREATE)) < 0) {
-                throw MyExcept("inotify_add_watch", data_dir_);
-            }
-            tid = new thread([&]() { this->wait(); });
-        }
-        else {
-            if (inotify_rm_watch(note_fd_, watch_token_) < 0) {
-                throw MyExcept("inotify_rm_watch", data_dir_);
-            }
-        }
-    }
-
-    void wait()
-    {
-        while (true) {
-            char buf[4096];
-            int ret = ::read(note_fd_, buf, sizeof(buf));
-            if (ret >=  0) {
-                auto ie = (struct inotify_event *)buf;
-                cout << "wd=" << ie->wd
-                    << " mask=" << hex << ie->mask << dec
-                    << " name=" << string_view(ie->name, ie->len)
-                    << endl;
-            }
-            else {
-                cout << "read returned ret=" << ret << " errno=" << errno << endl;
-            }
-        }
-    }
 };
 
 struct FileRef::Impl {
     path data_path_;
+    string name_;
     void* orig_ptr_;
     size_t len_;
 };
@@ -191,8 +162,11 @@ FileRef::FileRef(int data_fd, const path& data_dir, const string& name) : pImpl(
         size_t bcount = as_size_t(ptr);
         ptr = advance(ptr, sizeof(size_t));
         auto p = static_cast<char*>(ptr);
-        (*this)[i] = string_view(p, bcount);
+        auto sv = string_view(p, bcount);
+        (*this)[i] = sv;
+        ptr = my_align(ptr, bcount);
     }
+    pImpl->name_ = name;
 }
 
 FileRef::~FileRef()
@@ -201,6 +175,16 @@ FileRef::~FileRef()
     if (munmap(pImpl->orig_ptr_, pImpl->len_) < 0) {
         // throw MyExcept("mumap", pImpl->data_path_);
     }
+}
+
+path FileRef::getPath() const
+{
+    return pImpl->data_path_;
+}
+
+string FileRef::getName() const
+{
+    return pImpl->name_;
 }
 
 void FileRef::remove()
@@ -227,12 +211,51 @@ bool Filer::remove(const string& name)
     return pImpl->remove(name);
 }
 
-void Filer::watch(bool state)
-{
-    pImpl->watch(state);
-}
+struct FilerWatcher::Impl {
+    shared_ptr<Filer::Impl> filer_impl_;
+    int note_fd_;
+    int watch_token_;
+    function<void (shared_ptr<FileRef>)> callback_;
+    thread* tid;
 
-void Filer::wait()
+    Impl(Filer& filer, const function<void (shared_ptr<FileRef>)>& callback)
+    {
+        filer_impl_ = filer.pImpl;
+        callback_ = callback;
+        note_fd_ = inotify_init();
+        if ((watch_token_ = inotify_add_watch(note_fd_, filer_impl_->data_dir_.c_str(), IN_CREATE)) < 0) {
+            throw MyExcept("inotify_add_watch", filer_impl_->data_dir_);
+        }
+        tid = new thread([this]() { worker(); });
+    }
+
+    ~Impl()
+    {
+        tid->join();
+        delete tid;
+        inotify_rm_watch(note_fd_, watch_token_);
+        close(note_fd_);
+    }
+
+    void worker()
+    {
+        while (true) {
+            char buf[4096];
+            int ret = ::read(note_fd_, buf, sizeof(buf));
+            if (ret >=  0) {
+                auto ie = (struct inotify_event *)buf;
+                string name(ie->name, ie->len);
+                auto file_ref = make_shared<FileRef>(filer_impl_->data_fd_, filer_impl_->data_dir_, name);
+                callback_(file_ref);
+            }
+            else {
+                cout << "read returned ret=" << ret << " errno=" << errno << endl;
+            }
+        }
+    }
+};
+
+FilerWatcher::FilerWatcher(Filer& filer, const function<void (shared_ptr<FileRef>)>& callback)
+    : pImpl(new Impl(filer, callback))
 {
-    pImpl->wait();
 }
