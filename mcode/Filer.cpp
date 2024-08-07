@@ -115,34 +115,9 @@ struct Filer::Impl {
         close(fd);
     }
 
-    bool read(const string& name, DataVector& data)
+    shared_ptr<FileRef> read(const string& name)
     {
-        int fd = openat(data_fd_, name.c_str(), O_RDONLY);
-        if (fd < 0) {
-            return false;
-        }
-        struct stat ss;
-        fstat(fd, &ss);
-        auto orig_ptr = mmap(0, ss.st_size, PROT_READ, MAP_SHARED, fd, 0);
-        if (orig_ptr == MAP_FAILED) {
-            close(fd);
-            return false;
-        }
-        close(fd);
-        auto ptr = orig_ptr;
-        size_t vcount = as_size_t(ptr);
-        ptr = advance(ptr, sizeof(size_t));
-        data.resize(vcount);
-        for (auto i = 0; i < vcount; i++) {
-            size_t bcount = as_size_t(ptr);
-            ptr = advance(ptr, sizeof(size_t));
-            auto p = static_cast<char*>(ptr);
-            data[i] = string(p, bcount);
-        }
-        if (munmap(orig_ptr, ss.st_size) < 0) {
-            throw MyExcept("mumap", data_dir_ / name);
-        }
-        return true;
+        return make_shared<FileRef>(data_fd_, data_dir_, name);
     }
 
     bool remove(const string& name)
@@ -184,6 +159,55 @@ struct Filer::Impl {
     }
 };
 
+struct FileRef::Impl {
+    path data_path_;
+    void* orig_ptr_;
+    size_t len_;
+};
+
+FileRef::FileRef(int data_fd, const path& data_dir, const string& name) : pImpl(new Impl())
+{
+    pImpl->data_path_ = data_dir / name;
+    int fd = openat(data_fd, name.c_str(), O_RDONLY);
+    if (fd < 0) {
+        throw MyExcept("openat", pImpl->data_path_);
+    }
+    struct stat ss;
+    if (fstat(fd, &ss) < 0) {
+        throw MyExcept("fstat", pImpl->data_path_);
+    }
+    pImpl->len_ = ss.st_size;
+    pImpl->orig_ptr_ = mmap(0, ss.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    if (pImpl->orig_ptr_ == MAP_FAILED) {
+        close(fd);
+        throw MyExcept("mmap", pImpl->data_path_);
+    }
+    close(fd);
+    auto ptr = pImpl->orig_ptr_;
+    size_t vcount = as_size_t(ptr);
+    ptr = advance(ptr, sizeof(size_t));
+    resize(vcount);
+    for (auto i = 0; i < vcount; i++) {
+        size_t bcount = as_size_t(ptr);
+        ptr = advance(ptr, sizeof(size_t));
+        auto p = static_cast<char*>(ptr);
+        (*this)[i] = string_view(p, bcount);
+    }
+}
+
+FileRef::~FileRef()
+{
+    resize(0);
+    if (munmap(pImpl->orig_ptr_, pImpl->len_) < 0) {
+        // throw MyExcept("mumap", pImpl->data_path_);
+    }
+}
+
+void FileRef::remove()
+{
+    filesystem::remove(pImpl->data_path_);
+}
+
 Filer::Filer(const filesystem::path& root_dir) : pImpl(new Impl(root_dir))
 {
 }
@@ -193,9 +217,9 @@ void Filer::send(const string& name, const DataVector& data)
     pImpl->send(name, data);
 }
 
-bool Filer::read(const string& name, DataVector& data)
+shared_ptr<FileRef> Filer::read(const string& name)
 {
-    return pImpl->read(name, data);
+    return pImpl->read(name);
 }
 
 bool Filer::remove(const string& name)

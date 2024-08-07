@@ -19,10 +19,9 @@ int main(int argc, char *argv[])
             f.send("x", vector<string>{"x", "y"});
             sleep(1);
 
-            vector<string> data;
-            auto v = f.read("x", data);
-            cout << "v=" << v << " first=" << data[0] << " second=" << data[1] << endl;
-            f.remove("x");
+            auto v = f.read("x");
+            cout << "v=" << v << " first=" << (*v)[0] << " second=" << (*v)[1] << endl;
+            v->remove();
         }
     }
     catch (const std::exception& ex) {
