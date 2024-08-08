@@ -27,9 +27,9 @@ int main(int argc, char *argv[])
         });
 
         for (auto i = 0; i < 5; i++) {
-            sleep(1);
+            // sleep(1);
             f.send("x", vector<string>{"hello with a long nothing", "smoke", "gets", "in", "your", "eyes"});
-            cout << "after send" << endl;
+            // cout << "after send" << endl;
         }
     }
     catch (const std::exception& ex) {

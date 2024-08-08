@@ -2,19 +2,15 @@
 
 #include <fcntl.h>
 #include <unistd.h>
-#include <signal.h>
-#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/inotify.h>
 #include <cstring>
 #include <sstream>
-#include <system_error>
 #include <chrono>
 #include <thread>
-#include <string_view>
-#include <iostream>
+// #include <iostream>
 
 using namespace std;
 using namespace std::filesystem;
@@ -231,10 +227,10 @@ struct FilerWatcher::Impl {
 
     ~Impl()
     {
-        tid->join();
-        delete tid;
         inotify_rm_watch(note_fd_, watch_token_);
         close(note_fd_);
+        tid->join();
+        delete tid;
     }
 
     void worker()
@@ -249,7 +245,7 @@ struct FilerWatcher::Impl {
                 callback_(file_ref);
             }
             else {
-                cout << "read returned ret=" << ret << " errno=" << errno << endl;
+                break;
             }
         }
     }
