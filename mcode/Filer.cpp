@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/inotify.h>
+#include <sys/file.h>
 #include <cstring>
 #include <sstream>
 #include <chrono>
@@ -55,8 +56,10 @@ struct Filer::Impl {
     path data_dir_;
     int temp_fd_;
     int data_fd_;
+    // int lock_fd_;
+    const string lock_name;
 
-    Impl(const path& root_dir)
+    Impl(const path& root_dir) : lock_name("lock.lck")
     {
         data_dir_ = root_dir;
         temp_dir_ = root_dir / "temp";
@@ -65,12 +68,15 @@ struct Filer::Impl {
             throw MyExcept("open", temp_dir_);
         if ((data_fd_ = open(data_dir_.c_str(), O_DIRECTORY|O_RDONLY)) < 0)
             throw MyExcept("open", data_dir_);
+        // if ((lock_fd_ = openat(temp_fd_, lock_name.c_str(), O_CREAT|O_RDWR, 0644)) < 0)
+        //     throw MyExcept("openat", temp_dir_ / lock_name);
     }
 
     ~Impl()
     {
-        close(temp_fd_);
+        // close(lock_fd_);
         close(data_fd_);
+        close(temp_fd_);
     }
 
     void send(const string& name, const DataVector& data)
@@ -105,9 +111,15 @@ struct Filer::Impl {
         if (munmap(orig_ptr, byte_count) < 0) {
             throw MyExcept("mumap", temp_dir_ / file_name);
         }
+        if (flock(data_fd_, LOCK_EX) < 0) {
+            throw MyExcept("flock LOCK_EX", data_dir_);
+        }
+        unlinkat(data_fd_, name.c_str(), 0);
         if (linkat(temp_fd_, file_name, data_fd_, name.c_str(), 0) < 0) {
+            flock(data_fd_, LOCK_UN);
             throw MyExcept("linkat", data_dir_ / name);
         }
+        flock(data_fd_, LOCK_UN);
         if (unlinkat(temp_fd_, file_name, 0) < 0) {
             throw MyExcept("unlinkat", temp_dir_ / file_name);
         }
